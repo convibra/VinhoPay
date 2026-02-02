@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import axios from "axios";
 import { initDb, pool } from "./db.js";
@@ -5,10 +6,12 @@ import { initDb, pool } from "./db.js";
 const app = express();
 app.use(express.json());
 
-// 🔑 Agora usando os nomes corretos do Render
+// 🔑 Variáveis do Render
 const WA_TOKEN = process.env.WA_TOKEN;
 const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
+
+const ADMIN_PASS = process.env.ADMIN_PASS;
 
 // =========================
 // Função para enviar mensagem WhatsApp
@@ -21,13 +24,13 @@ async function sendWhatsAppText(to, text) {
         messaging_product: "whatsapp",
         to,
         type: "text",
-        text: { body: text }
+        text: { body: text },
       },
       {
         headers: {
           Authorization: `Bearer ${WA_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
       }
     );
   } catch (err) {
@@ -38,14 +41,14 @@ async function sendWhatsAppText(to, text) {
       code: e?.code,
       error_subcode: e?.error_subcode,
       fbtrace_id: e?.fbtrace_id,
-      status: err?.response?.status
+      status: err?.response?.status,
     });
     throw err;
   }
 }
 
 // =========================
-// Funções de banco
+// Funções de banco: USERS
 // =========================
 async function getUserByPhone(phone) {
   const r = await pool.query(
@@ -74,6 +77,37 @@ function normalizeName(raw) {
   const name = raw.trim().replace(/\s+/g, " ");
   if (name.length < 2 || name.length > 60) return null;
   return name;
+}
+
+// =========================
+// Funções de banco: RESTAURANTS
+// =========================
+async function isRestaurantPhone(phone) {
+  const r = await pool.query(
+    "select 1 from restaurants where phone_whatsapp = $1 limit 1",
+    [phone]
+  );
+  return r.rowCount > 0;
+}
+
+async function getPartnerRestaurants() {
+  const r = await pool.query(`
+    SELECT id, name, contact_name, phone_whatsapp, neighborhood, city, state, accepts_cork_waiver
+    FROM restaurants
+    WHERE is_partner = true
+    ORDER BY name ASC
+  `);
+  return r.rows;
+}
+
+function formatRestaurantMenu(restaurants) {
+  let msg = "🍷 Qual restaurante você quer reservar?\n\n";
+  restaurants.forEach((r, i) => {
+    const place = [r.neighborhood, r.city].filter(Boolean).join(" - ");
+    msg += `${i + 1}) ${r.name}${place ? ` (${place})` : ""}\n`;
+  });
+  msg += "\nResponda apenas com o número.";
+  return msg;
 }
 
 // =========================
@@ -107,16 +141,22 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩 Mensagem recebida:", phone, text);
 
+    // ✅ MVP: se quem falou é um restaurante cadastrado, ignore por enquanto
+    if (await isRestaurantPhone(phone)) {
+      console.log("🏪 Mensagem de restaurante (ignorada no MVP):", phone, text);
+      return res.sendStatus(200);
+    }
+
     let user = await getUserByPhone(phone);
 
-    // Usuário não existe
+    // 1) Usuário não existe
     if (!user) {
       await createUser(phone);
       await sendWhatsAppText(phone, "Oi! 😊 Qual seu nome?");
       return res.sendStatus(200);
     }
 
-    // Usuário existe mas ainda não tem nome
+    // 2) Usuário existe mas ainda não tem nome
     if (user.stage === "ASKED_NAME" && (!user.name || user.name.trim() === "")) {
       const name = normalizeName(text);
 
@@ -126,20 +166,123 @@ app.post("/webhook", async (req, res) => {
       }
 
       await setUserNameActive(phone, name);
-      await sendWhatsAppText(phone, `Olá, ${name}! Como posso te ajudar?`);
+
+      // Após cadastrar, já manda a pergunta do restaurante
+      const restaurants = await getPartnerRestaurants();
+      if (restaurants.length === 0) {
+        await sendWhatsAppText(
+          phone,
+          `Olá, ${name}! ✅ Cadastro concluído.\n\nAinda não temos restaurantes parceiros cadastrados 😔`
+        );
+        return res.sendStatus(200);
+      }
+
+      await pool.query(
+        "update users set stage='CHOOSE_RESTAURANT', updated_at=now() where phone=$1",
+        [phone]
+      );
+
+      await sendWhatsAppText(phone, `Olá, ${name}! ✅`);
+      await sendWhatsAppText(phone, formatRestaurantMenu(restaurants));
       return res.sendStatus(200);
     }
 
-    // Usuário já cadastrado
-    await sendWhatsAppText(phone, `Olá, ${user.name}! Como posso te ajudar?`);
-    return res.sendStatus(200);
+    // 3) Usuário escolhendo restaurante
+    if (user.stage === "CHOOSE_RESTAURANT") {
+      const choice = parseInt(text, 10);
 
+      if (Number.isNaN(choice)) {
+        await sendWhatsAppText(phone, "Por favor, responda apenas com o número do restaurante.");
+        return res.sendStatus(200);
+      }
+
+      const restaurants = await getPartnerRestaurants();
+
+      if (restaurants.length === 0) {
+        await pool.query(
+          "update users set stage='ACTIVE', updated_at=now() where phone=$1",
+          [phone]
+        );
+        await sendWhatsAppText(phone, "Ainda não temos restaurantes parceiros cadastrados 😔");
+        return res.sendStatus(200);
+      }
+
+      if (choice < 1 || choice > restaurants.length) {
+        await sendWhatsAppText(phone, "Número inválido. Escolha um da lista.");
+        return res.sendStatus(200);
+      }
+
+      const selected = restaurants[choice - 1];
+
+      // Envia para o restaurante (pré-reserva)
+      const msgToRestaurant =
+        `🍷 VinhoPay - Pré-reserva\n\n` +
+        `Cliente: ${user.name || "Cliente"}\n` +
+        `WhatsApp: ${phone}\n` +
+        `Restaurante: ${selected.name}\n` +
+        `Benefício: Isenção de rolha (VinhoPay)\n\n` +
+        `Em breve enviaremos data/horário e nº de pessoas.\n` +
+        `Se quiser falar com o cliente, responda para este número.`;
+
+      await sendWhatsAppText(selected.phone_whatsapp, msgToRestaurant);
+
+      // Por enquanto, volta o usuário para ACTIVE
+      await pool.query(
+        "update users set stage='ACTIVE', updated_at=now() where phone=$1",
+        [phone]
+      );
+
+      await sendWhatsAppText(
+        phone,
+        `✅ Ok, ${user.name}! Enviei sua solicitação para o restaurante *${selected.name}*.\n` +
+          `Já já seguimos com número de pessoas e data.`
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // 4) Usuário ativo: mostrar lista de restaurantes
+    if (user.stage === "ACTIVE") {
+      const restaurants = await getPartnerRestaurants();
+
+      if (restaurants.length === 0) {
+        await sendWhatsAppText(phone, "Ainda não temos restaurantes parceiros cadastrados 😔");
+        return res.sendStatus(200);
+      }
+
+      await pool.query(
+        "update users set stage='CHOOSE_RESTAURANT', updated_at=now() where phone=$1",
+        [phone]
+      );
+
+      await sendWhatsAppText(phone, formatRestaurantMenu(restaurants));
+      return res.sendStatus(200);
+    }
+
+    // Fallback: se stage desconhecido, reseta para ACTIVE e mostra menu
+    await pool.query("update users set stage='ACTIVE', updated_at=now() where phone=$1", [
+      phone,
+    ]);
+    const restaurants = await getPartnerRestaurants();
+    if (restaurants.length === 0) {
+      await sendWhatsAppText(phone, "Ainda não temos restaurantes parceiros cadastrados 😔");
+      return res.sendStatus(200);
+    }
+    await pool.query(
+      "update users set stage='CHOOSE_RESTAURANT', updated_at=now() where phone=$1",
+      [phone]
+    );
+    await sendWhatsAppText(phone, formatRestaurantMenu(restaurants));
+    return res.sendStatus(200);
   } catch (err) {
     console.error("❌ Erro no webhook:", err?.response?.data || err);
     return res.sendStatus(200);
   }
 });
 
+// =========================
+// Endpoint util: listar usuários
+// =========================
 app.get("/users", async (req, res) => {
   try {
     const r = await pool.query("select * from users order by created_at desc");
@@ -150,13 +293,13 @@ app.get("/users", async (req, res) => {
   }
 });
 
-const ADMIN_PASS = process.env.ADMIN_PASS;
-
+// =========================
+// Endpoint admin: set-name
+// =========================
 app.get("/set-name", async (req, res) => {
   try {
     const { phone, name, pass } = req.query;
 
-    // proteção
     if (pass !== ADMIN_PASS) {
       return res.status(403).send("❌ Acesso negado: senha inválida");
     }
