@@ -150,6 +150,23 @@ app.get("/users", async (req, res) => {
   }
 });
 
+app.put("/user/:phone", async (req, res) => {
+  try {
+    const { name } = req.body;
+    const phone = req.params.phone;
+
+    await pool.query(
+      "update users set name=$1, stage='ACTIVE', updated_at=now() where phone=$2",
+      [name, phone]
+    );
+
+    res.json({ ok: true, phone, name });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erro ao atualizar usuário" });
+  }
+});
+
 // =========================
 // Inicialização do servidor
 // =========================
