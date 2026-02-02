@@ -140,6 +140,16 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+app.get("/users", async (req, res) => {
+  try {
+    const r = await pool.query("select * from users order by created_at desc");
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erro ao buscar usuários" });
+  }
+});
+
 // =========================
 // Inicialização do servidor
 // =========================
