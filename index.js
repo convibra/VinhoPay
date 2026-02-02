@@ -9,24 +9,37 @@ const META_TOKEN = process.env.META_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 // =========================
-// Função para enviar mensagem WhatsApp
+// Função para enviar mensagem WhatsApp (com log detalhado de erro)
 // =========================
 async function sendWhatsAppText(to, text) {
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${META_TOKEN}`,
-        "Content-Type": "application/json"
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: text }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${META_TOKEN}`,
+          "Content-Type": "application/json"
+        }
       }
-    }
-  );
+    );
+  } catch (err) {
+    const e = err?.response?.data?.error;
+    console.error("❌ Erro ao enviar WhatsApp (detalhado):", {
+      message: e?.message,
+      type: e?.type,
+      code: e?.code,
+      error_subcode: e?.error_subcode,
+      fbtrace_id: e?.fbtrace_id,
+      status: err?.response?.status
+    });
+    throw err;
+  }
 }
 
 // =========================
@@ -87,10 +100,10 @@ app.post("/webhook", async (req, res) => {
     const msg = value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
-    const phone = msg.from; // telefone do usuário
+    const phone = msg.from;
     const text = (msg?.text?.body || "").trim();
 
-    console.log("Mensagem recebida:", phone, text);
+    console.log("📩 Mensagem recebida:", phone, text);
 
     let user = await getUserByPhone(phone);
 
@@ -120,7 +133,7 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
 
   } catch (err) {
-    console.error("Erro no webhook:", err);
+    console.error("❌ Erro no webhook:", err?.response?.data || err);
     return res.sendStatus(200);
   }
 });
@@ -130,6 +143,9 @@ app.post("/webhook", async (req, res) => {
 // =========================
 async function start() {
   try {
+    console.log("TOKEN OK?", !!process.env.META_TOKEN);
+    console.log("PHONE_NUMBER_ID:", process.env.PHONE_NUMBER_ID);
+
     await initDb();
     console.log("✅ Banco inicializado (tabelas OK)");
   } catch (err) {
