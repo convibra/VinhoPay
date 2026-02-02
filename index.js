@@ -150,20 +150,30 @@ app.get("/users", async (req, res) => {
   }
 });
 
-app.put("/user/:phone", async (req, res) => {
+const ADMIN_PASS = process.env.ADMIN_PASS;
+
+app.get("/set-name", async (req, res) => {
   try {
-    const { name } = req.body;
-    const phone = req.params.phone;
+    const { phone, name, pass } = req.query;
+
+    // proteção
+    if (pass !== ADMIN_PASS) {
+      return res.status(403).send("❌ Acesso negado: senha inválida");
+    }
+
+    if (!phone || !name) {
+      return res.status(400).send("Use ?phone=...&name=...");
+    }
 
     await pool.query(
       "update users set name=$1, stage='ACTIVE', updated_at=now() where phone=$2",
       [name, phone]
     );
 
-    res.json({ ok: true, phone, name });
+    res.send(`✅ OK! Usuário ${phone} atualizado para nome=${name}`);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Erro ao atualizar usuário" });
+    res.status(500).send("Erro ao atualizar usuário");
   }
 });
 
