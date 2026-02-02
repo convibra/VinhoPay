@@ -5,16 +5,18 @@ import { initDb, pool } from "./db.js";
 const app = express();
 app.use(express.json());
 
-const META_TOKEN = process.env.META_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+// 🔑 Agora usando os nomes corretos do Render
+const WA_TOKEN = process.env.WA_TOKEN;
+const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
+const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
 
 // =========================
-// Função para enviar mensagem WhatsApp (com log detalhado de erro)
+// Função para enviar mensagem WhatsApp
 // =========================
 async function sendWhatsAppText(to, text) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/v20.0/${WA_PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         to,
@@ -23,7 +25,7 @@ async function sendWhatsAppText(to, text) {
       },
       {
         headers: {
-          Authorization: `Bearer ${META_TOKEN}`,
+          Authorization: `Bearer ${WA_TOKEN}`,
           "Content-Type": "application/json"
         }
       }
@@ -82,7 +84,7 @@ app.get("/webhook", (req, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+  if (mode === "subscribe" && token === WA_VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
@@ -143,8 +145,8 @@ app.post("/webhook", async (req, res) => {
 // =========================
 async function start() {
   try {
-    console.log("TOKEN OK?", !!process.env.META_TOKEN);
-    console.log("PHONE_NUMBER_ID:", process.env.PHONE_NUMBER_ID);
+    console.log("WA_TOKEN length:", (WA_TOKEN || "").length);
+    console.log("WA_PHONE_NUMBER_ID:", WA_PHONE_NUMBER_ID);
 
     await initDb();
     console.log("✅ Banco inicializado (tabelas OK)");
