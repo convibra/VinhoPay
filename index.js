@@ -994,27 +994,7 @@ app.post("/webhook", async (req, res) => {
 
 	await setUserStage(phone, "ASK_PARTY_SIZE");
 
-	// 📸 Envia 3-4 fotos do restaurante escolhido (se existirem)
-	const photos = [
-  	 selected.image_url_1,
-  	 selected.image_url_2,
-  	 selected.image_url_3,
-  	 selected.image_url_4,
-	]
-  	 .filter(Boolean)
-  	 .map((u) => u.trim())
-  	 .filter((u) => u.startsWith("http"));
-
-	if (photos.length) {
-  	 await sendWhatsAppText(
-       phone,
-       `📸 Alguns pratos do *${selected.name}* para você se inspirar:`
-  	);
-
-  for (let i = 0; i < Math.min(4, photos.length); i++) {
-    const caption = i === 0 ? selected.name : "";
-    await sendWhatsAppImage(phone, photos[i], caption);
-  }
+	
 }
 
 
