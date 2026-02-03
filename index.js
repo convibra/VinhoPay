@@ -251,12 +251,28 @@ async function getRestaurantById(id) {
   return r.rows[0] ?? null;
 }
 
+function fixEncoding(str) {
+  if (!str) return str;
+  try {
+    // Corrige casos típicos onde o texto chegou como latin1/win1252
+    return Buffer.from(str, "latin1").toString("utf8");
+  } catch {
+    return str;
+  }
+}
+
 function formatRestaurantMenu(restaurants) {
   let msg = "🍷 Qual restaurante você quer reservar?\n\n";
+
   restaurants.forEach((r, i) => {
-    const place = [r.neighborhood, r.city].filter(Boolean).join(" - ");
-    msg += `${i + 1}) ${r.name}${place ? ` (${place})` : ""}\n`;
+    const name = fixEncoding(r.name);
+    const neighborhood = fixEncoding(r.neighborhood);
+    const city = fixEncoding(r.city);
+
+    const place = [neighborhood, city].filter(Boolean).join(" - ");
+    msg += `${i + 1}) ${name}${place ? ` (${place})` : ""}\n`;
   });
+
   msg += "\nResponda apenas com o número.";
   return msg;
 }
