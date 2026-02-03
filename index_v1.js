@@ -69,20 +69,6 @@ async function ensureSchema() {
     ALTER TABLE reservations
     ADD COLUMN IF NOT EXISTS reserved_day INT;
   `);
-
-  // reservations: resposta do restaurante (confirmar/recusar + motivo)
-  await pool.query(`
-    ALTER TABLE reservations
-    ADD COLUMN IF NOT EXISTS restaurant_response_status VARCHAR(30);
-  `);
-  await pool.query(`
-    ALTER TABLE reservations
-    ADD COLUMN IF NOT EXISTS restaurant_response_reason TEXT;
-  `);
-  await pool.query(`
-    ALTER TABLE reservations
-    ADD COLUMN IF NOT EXISTS restaurant_responded_at TIMESTAMP;
-  `);
 }
 
 // =========================
@@ -147,17 +133,6 @@ async function isRestaurantPhone(phone) {
     [phone]
   );
   return r.rowCount > 0;
-}
-
-async function getRestaurantByPhone(phone) {
-  const r = await pool.query(
-    `SELECT id, name, contact_name, phone_whatsapp
-     FROM restaurants
-     WHERE phone_whatsapp = $1
-     LIMIT 1`,
-    [phone]
-  );
-  return r.rows[0] ?? null;
 }
 
 async function getPartnerRestaurants() {
@@ -253,16 +228,10 @@ async function setReservationTime(reservationId, timeHHMM) {
   );
 }
 
-// ✅ agora vira pendente do restaurante
 async function confirmReservation(reservationId) {
   await pool.query(
     `UPDATE reservations
-     SET status = 'PENDING_RESTAURANT',
-         step = 'WAIT_RESTAURANT',
-         restaurant_response_status = NULL,
-         restaurant_response_reason = NULL,
-         restaurant_responded_at = NULL,
-         updated_at = now()
+     SET status = 'CONFIRMED', step = 'DONE', updated_at = now()
      WHERE id = $1`,
     [reservationId]
   );
@@ -274,92 +243,6 @@ async function cancelReservation(reservationId) {
      SET status = 'CANCELLED', step = 'DONE', updated_at = now()
      WHERE id = $1`,
     [reservationId]
-  );
-}
-
-// ====== fluxo restaurante ======
-async function getLatestPendingReservationForRestaurant(restaurantId) {
-  const r = await pool.query(
-    `SELECT r.*,
-            u.phone AS user_phone,
-            u.name  AS user_name,
-            to_char(r.reserved_date, 'DD/MM/YYYY') AS reserved_date_br
-     FROM reservations r
-     JOIN users u ON u.id = r.user_id
-     WHERE r.restaurant_id = $1
-       AND r.status = 'PENDING_RESTAURANT'
-       AND (r.restaurant_response_status IS NULL
-            OR r.restaurant_response_status IN ('AWAITING_REASON', 'AWAITING_REASON_TEXT'))
-     ORDER BY r.created_at DESC
-     LIMIT 1`,
-    [restaurantId]
-  );
-  return r.rows[0] ?? null;
-}
-
-async function markRestaurantConfirmed(reservationId) {
-  await pool.query(
-    `UPDATE reservations
-     SET restaurant_response_status = 'CONFIRMED',
-         restaurant_responded_at = now(),
-         status = 'CONFIRMED',
-         step = 'DONE',
-         updated_at = now()
-     WHERE id = $1`,
-    [reservationId]
-  );
-}
-
-async function markRestaurantAwaitReason(reservationId) {
-  await pool.query(
-    `UPDATE reservations
-     SET restaurant_response_status = 'AWAITING_REASON',
-         updated_at = now()
-     WHERE id = $1`,
-    [reservationId]
-  );
-}
-
-async function markRestaurantAwaitReasonText(reservationId) {
-  await pool.query(
-    `UPDATE reservations
-     SET restaurant_response_status = 'AWAITING_REASON_TEXT',
-         updated_at = now()
-     WHERE id = $1`,
-    [reservationId]
-  );
-}
-
-async function markRestaurantRejected(reservationId, reasonText) {
-  await pool.query(
-    `UPDATE reservations
-     SET restaurant_response_status = 'REJECTED',
-         restaurant_response_reason = $2,
-         restaurant_responded_at = now(),
-         status = 'REJECTED',
-         step = 'DONE',
-         updated_at = now()
-     WHERE id = $1`,
-    [reservationId, reasonText]
-  );
-}
-
-function restaurantDecisionMenu() {
-  return (
-    "🍷 VinhoPay - Confirmação de Reserva\n\n" +
-    "Responda:\n" +
-    "1 - Confirmar\n" +
-    "0 - Recusar"
-  );
-}
-
-function restaurantRejectReasonMenu() {
-  return (
-    "❌ Reserva recusada. Qual o motivo?\n\n" +
-    "Responda:\n" +
-    "1 - Lotado\n" +
-    "2 - Não funciona neste horário\n" +
-    "3 - Outro motivo (vou escrever)"
   );
 }
 
@@ -462,122 +345,12 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩 Mensagem recebida:", phone, text);
 
-    // =========================
-    // FLUXO DO RESTAURANTE
-    // =========================
-    const restaurantByPhone = await getRestaurantByPhone(phone);
-    if (restaurantByPhone) {
-      console.log("🏪 Mensagem do restaurante:", restaurantByPhone.name, phone, text);
-
-      const pending = await getLatestPendingReservationForRestaurant(restaurantByPhone.id);
-
-      if (!pending) {
-        await sendWhatsAppText(
-          phone,
-          "Não encontrei nenhuma reserva pendente para confirmar/recusar no momento."
-        );
-        return res.sendStatus(200);
-      }
-
-      const rStatus = pending.restaurant_response_status; // null | AWAITING_REASON | AWAITING_REASON_TEXT | ...
-
-      // 1) Aguardando 1/0
-      if (!rStatus) {
-        if (text === "1") {
-          await markRestaurantConfirmed(pending.id);
-
-          const timeStr = String(pending.reserved_time).slice(0, 5);
-          await sendWhatsAppText(
-            pending.user_phone,
-            `✅ O restaurante *${restaurantByPhone.name}* confirmou sua reserva!\n\n` +
-              `👥 Pessoas: ${pending.party_size}\n` +
-              `📅 Data: ${pending.reserved_date_br}\n` +
-              `⏰ Horário: ${timeStr}\n\n` +
-              `Qualquer coisa, é só me chamar. 🍷`
-          );
-
-          await sendWhatsAppText(phone, "✅ Confirmado! Já avisei o cliente no WhatsApp.");
-          return res.sendStatus(200);
-        }
-
-        if (text === "0") {
-          await markRestaurantAwaitReason(pending.id);
-          await sendWhatsAppText(phone, restaurantRejectReasonMenu());
-          return res.sendStatus(200);
-        }
-
-        await sendWhatsAppText(phone, restaurantDecisionMenu());
-        return res.sendStatus(200);
-      }
-
-      // 2) Motivo (1/2/3)
-      if (rStatus === "AWAITING_REASON") {
-        if (text === "1") {
-          await markRestaurantRejected(pending.id, "Lotado");
-
-          await sendWhatsAppText(
-            pending.user_phone,
-            `❌ O restaurante *${restaurantByPhone.name}* não conseguiu confirmar sua reserva.\n` +
-              `Motivo: Lotado.\n\n` +
-              `Quer tentar outro restaurante? 🍷`
-          );
-
-          await sendWhatsAppText(phone, "OK. Registrei como *Lotado* e avisei o cliente.");
-          return res.sendStatus(200);
-        }
-
-        if (text === "2") {
-          await markRestaurantRejected(pending.id, "Não funciona neste horário");
-
-          await sendWhatsAppText(
-            pending.user_phone,
-            `❌ O restaurante *${restaurantByPhone.name}* não conseguiu confirmar sua reserva.\n` +
-              `Motivo: Não funciona neste horário.\n\n` +
-              `Quer tentar outro restaurante? 🍷`
-          );
-
-          await sendWhatsAppText(phone, "OK. Registrei o motivo e avisei o cliente.");
-          return res.sendStatus(200);
-        }
-
-        if (text === "3") {
-          await markRestaurantAwaitReasonText(pending.id);
-          await sendWhatsAppText(phone, "Por favor, escreva o motivo da recusa:");
-          return res.sendStatus(200);
-        }
-
-        await sendWhatsAppText(phone, restaurantRejectReasonMenu());
-        return res.sendStatus(200);
-      }
-
-      // 3) Texto livre
-      if (rStatus === "AWAITING_REASON_TEXT") {
-        const reason = (text || "").trim();
-        if (reason.length < 3) {
-          await sendWhatsAppText(phone, "Motivo muito curto. Escreva uma frase, por favor:");
-          return res.sendStatus(200);
-        }
-
-        await markRestaurantRejected(pending.id, reason);
-
-        await sendWhatsAppText(
-          pending.user_phone,
-          `❌ O restaurante *${restaurantByPhone.name}* não conseguiu confirmar sua reserva.\n` +
-            `Motivo: ${reason}\n\n` +
-            `Quer tentar outro restaurante? 🍷`
-        );
-
-        await sendWhatsAppText(phone, "OK. Registrei o motivo e avisei o cliente.");
-        return res.sendStatus(200);
-      }
-
-      await sendWhatsAppText(phone, "Essa reserva já foi respondida. Se houver outra pendente, eu aviso.");
+    // ✅ MVP: se veio de um restaurante cadastrado, ignore por enquanto
+    if (await isRestaurantPhone(phone)) {
+      console.log("🏪 Mensagem de restaurante (ignorada no MVP):", phone, text);
       return res.sendStatus(200);
     }
 
-    // =========================
-    // FLUXO DO USUÁRIO
-    // =========================
     let user = await getUserByPhone(phone);
 
     // 1) Usuário não existe → pede nome
@@ -773,14 +546,14 @@ app.post("/webhook", async (req, res) => {
       const partySize = r2.rows[0]?.party_size;
       const dateStr = r2.rows[0]?.date_br || "(data)";
 
-      const msg2 = formatConfirmMessage(
+      const msg = formatConfirmMessage(
         restaurant?.name || "Restaurante",
         partySize,
         dateStr,
         timeHHMM
       );
 
-      await sendWhatsAppText(phone, msg2);
+      await sendWhatsAppText(phone, msg);
       return res.sendStatus(200);
     }
 
@@ -831,7 +604,7 @@ app.post("/webhook", async (req, res) => {
       const restaurant = await getRestaurantById(full.restaurant_id);
 
       const msgToRestaurant =
-        `🍷 VinhoPay - Nova reserva (pendente)\n\n` +
+        `🍷 VinhoPay - Reserva\n\n` +
         `Cliente: ${full.user_name || "Cliente"}\n` +
         `WhatsApp: ${full.user_phone}\n\n` +
         `Reserva:\n` +
@@ -839,32 +612,23 @@ app.post("/webhook", async (req, res) => {
         `📅 Data: ${full.reserved_date_br || full.reserved_date}\n` +
         `⏰ Horário: ${String(full.reserved_time).slice(0, 5)}\n` +
         `🎁 Benefício: Isenção de rolha (VinhoPay)\n\n` +
-        `Responda:\n1 - Confirmar\n0 - Recusar`;
+        `Contato do responsável: ${restaurant?.contact_name || "-"}\n`;
 
       if (restaurant?.phone_whatsapp) {
         await sendWhatsAppText(restaurant.phone_whatsapp, msgToRestaurant);
       }
 
-      // mantém active_reservation_id até o restaurante responder
-      await setUserStage(phone, "WAIT_RESTAURANT");
+      await clearUserActiveReservation(phone);
+      await setUserStage(phone, "ACTIVE");
 
       await sendWhatsAppText(
         phone,
-        `⏳ Pedido enviado! Agora o restaurante *${restaurant?.name || ""}* precisa confirmar.\n\nAssim que eles responderem, eu te aviso aqui no WhatsApp. 🍷`
+        `✅ Reserva confirmada! Enviei os detalhes para o restaurante *${restaurant?.name || ""}*.\n\nSe quiser fazer outra reserva, é só me chamar.`
       );
       return res.sendStatus(200);
     }
 
-    // 9) WAIT_RESTAURANT
-    if (user.stage === "WAIT_RESTAURANT") {
-      await sendWhatsAppText(
-        phone,
-        "⏳ Sua reserva ainda está aguardando confirmação do restaurante.\n\nAssim que eles responderem, eu te aviso aqui."
-      );
-      return res.sendStatus(200);
-    }
-
-    // 10) ACTIVE → mostra menu
+    // 9) ACTIVE → mostra menu
     if (user.stage === "ACTIVE") {
       const restaurants = await getPartnerRestaurants();
       if (restaurants.length === 0) {
