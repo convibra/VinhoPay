@@ -56,12 +56,6 @@ async function ensureSchema() {
     ADD COLUMN IF NOT EXISTS active_reservation_id BIGINT;
   `);
 
-  // users: feedback ativo (você já tem no banco, mas garante caso suba em outro ambiente)
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS active_feedback_id BIGINT;
-  `);
-
   // reservations: armazenar mês/dia/ano durante o fluxo (antes de montar DATE)
   await pool.query(`
     ALTER TABLE reservations
@@ -89,65 +83,6 @@ async function ensureSchema() {
     ALTER TABLE reservations
     ADD COLUMN IF NOT EXISTS restaurant_responded_at TIMESTAMP;
   `);
-
-  // reservation_feedbacks: garante tabela (caso rode em outro ambiente)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS reservation_feedbacks (
-      id BIGSERIAL PRIMARY KEY,
-      reservation_id BIGINT NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
-      status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
-      step   VARCHAR(30) NOT NULL DEFAULT 'ASK_WINE',
-      asked_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
-      started_at TIMESTAMP WITHOUT TIME ZONE,
-      completed_at TIMESTAMP WITHOUT TIME ZONE,
-      wine_text TEXT,
-      dish_text TEXT,
-      rating_1_5 INT,
-      comment_text TEXT,
-      created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
-      updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
-      send_at TIMESTAMP WITHOUT TIME ZONE,
-      CONSTRAINT reservation_feedbacks_rating_chk
-        CHECK (rating_1_5 IS NULL OR (rating_1_5 BETWEEN 1 AND 5))
-    );
-  `);
-
-  // índices essenciais
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_feedback_one_per_reservation
-    ON reservation_feedbacks (reservation_id);
-  `);
-
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS ix_feedback_send_at_status
-    ON reservation_feedbacks (status, send_at);
-  `);
-
-  // FK opcional para active_reservation_id (se já existir, ignora via try/catch)
-  try {
-    await pool.query(`
-      ALTER TABLE users
-      ADD CONSTRAINT fk_users_active_reservation
-      FOREIGN KEY (active_reservation_id) REFERENCES reservations(id)
-      DEFERRABLE INITIALLY DEFERRED;
-    `);
-  } catch (_) {}
-
-  // FK opcional para active_feedback_id
-  try {
-    await pool.query(`
-      ALTER TABLE users
-      ADD CONSTRAINT fk_users_active_feedback
-      FOREIGN KEY (active_feedback_id) REFERENCES reservation_feedbacks(id)
-      DEFERRABLE INITIALLY DEFERRED;
-    `);
-  } catch (_) {}
-
-  // índice recomendado para fluxo do restaurante
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS ix_res_pending_by_restaurant
-    ON reservations (restaurant_id, status, created_at DESC);
-  `);
 }
 
 // =========================
@@ -155,7 +90,7 @@ async function ensureSchema() {
 // =========================
 async function getUserByPhone(phone) {
   const r = await pool.query(
-    "select id, phone, name, stage, active_reservation_id, active_feedback_id from users where phone = $1",
+    "select id, phone, name, stage, active_reservation_id from users where phone = $1",
     [phone]
   );
   return r.rows[0] ?? null;
@@ -169,17 +104,17 @@ async function createUser(phone) {
 }
 
 async function setUserName(phone, name) {
-  await pool.query("update users set name=$1, updated_at=now() where phone=$2", [
-    name,
-    phone,
-  ]);
+  await pool.query(
+    "update users set name=$1, updated_at=now() where phone=$2",
+    [name, phone]
+  );
 }
 
 async function setUserStage(phone, stage) {
-  await pool.query("update users set stage=$1, updated_at=now() where phone=$2", [
-    stage,
-    phone,
-  ]);
+  await pool.query(
+    "update users set stage=$1, updated_at=now() where phone=$2",
+    [stage, phone]
+  );
 }
 
 async function setUserActiveReservation(phone, reservationId) {
@@ -196,20 +131,6 @@ async function clearUserActiveReservation(phone) {
   );
 }
 
-async function setUserActiveFeedback(phone, feedbackId) {
-  await pool.query(
-    "update users set active_feedback_id=$1, updated_at=now() where phone=$2",
-    [feedbackId, phone]
-  );
-}
-
-async function clearUserActiveFeedback(phone) {
-  await pool.query(
-    "update users set active_feedback_id=NULL, updated_at=now() where phone=$1",
-    [phone]
-  );
-}
-
 function normalizeName(raw) {
   if (!raw) return null;
   const name = raw.trim().replace(/\s+/g, " ");
@@ -220,6 +141,14 @@ function normalizeName(raw) {
 // =========================
 // Funções de banco: RESTAURANTS
 // =========================
+async function isRestaurantPhone(phone) {
+  const r = await pool.query(
+    "select 1 from restaurants where phone_whatsapp = $1 limit 1",
+    [phone]
+  );
+  return r.rowCount > 0;
+}
+
 async function getRestaurantByPhone(phone) {
   const r = await pool.query(
     `SELECT id, name, contact_name, phone_whatsapp
@@ -435,170 +364,6 @@ function restaurantRejectReasonMenu() {
 }
 
 // =========================
-// Funções de banco: FEEDBACK
-// =========================
-async function ensureFeedbackForReservation(reservationId) {
-  await pool.query(
-    `
-    INSERT INTO reservation_feedbacks (reservation_id, status, step, send_at)
-    SELECT r.id,
-           'PENDING',
-           'ASK_WINE',
-           (r.reserved_date::timestamp + r.reserved_time) + interval '90 minutes'
-    FROM reservations r
-    WHERE r.id = $1
-      AND r.status = 'CONFIRMED'
-      AND r.reserved_date IS NOT NULL
-      AND r.reserved_time IS NOT NULL
-    ON CONFLICT (reservation_id) DO NOTHING
-    `,
-    [reservationId]
-  );
-}
-
-async function getActiveFeedbackByUser(user) {
-  if (!user?.active_feedback_id) return null;
-  const r = await pool.query(`SELECT * FROM reservation_feedbacks WHERE id = $1`, [
-    user.active_feedback_id,
-  ]);
-  return r.rows[0] ?? null;
-}
-
-async function setFeedbackWine(feedbackId, wineText) {
-  await pool.query(
-    `
-    UPDATE reservation_feedbacks
-    SET wine_text = $1,
-        step = 'ASK_DISH',
-        status = 'IN_PROGRESS',
-        updated_at = now()
-    WHERE id = $2
-    `,
-    [wineText, feedbackId]
-  );
-}
-
-async function setFeedbackDish(feedbackId, dishText) {
-  await pool.query(
-    `
-    UPDATE reservation_feedbacks
-    SET dish_text = $1,
-        step = 'ASK_RATING',
-        status = 'IN_PROGRESS',
-        updated_at = now()
-    WHERE id = $2
-    `,
-    [dishText, feedbackId]
-  );
-}
-
-async function setFeedbackRating(feedbackId, rating) {
-  await pool.query(
-    `
-    UPDATE reservation_feedbacks
-    SET rating_1_5 = $1,
-        step = 'ASK_COMMENT',
-        status = 'IN_PROGRESS',
-        updated_at = now()
-    WHERE id = $2
-    `,
-    [rating, feedbackId]
-  );
-}
-
-async function finishFeedback(feedbackId, commentText) {
-  await pool.query(
-    `
-    UPDATE reservation_feedbacks
-    SET comment_text = $1,
-        step = 'DONE',
-        status = 'DONE',
-        completed_at = now(),
-        updated_at = now()
-    WHERE id = $2
-    `,
-    [commentText, feedbackId]
-  );
-}
-
-// =========================
-// Endpoint Cron: enviar feedbacks vencidos
-// GET /jobs/send-due-feedbacks?pass=...
-// =========================
-app.get("/jobs/send-due-feedbacks", async (req, res) => {
-  try {
-    const pass = req.query.pass;
-    if (pass !== ADMIN_PASS) return res.status(403).send("forbidden");
-
-    const locked = await pool.query(`
-      WITH due AS (
-        SELECT f.id
-        FROM reservation_feedbacks f
-        WHERE f.status = 'PENDING'
-          AND f.send_at IS NOT NULL
-          AND f.send_at <= now()
-        ORDER BY f.send_at ASC
-        LIMIT 50
-        FOR UPDATE SKIP LOCKED
-      )
-      UPDATE reservation_feedbacks f
-      SET status = 'IN_PROGRESS',
-          step = 'ASK_WINE',
-          started_at = COALESCE(f.started_at, now()),
-          updated_at = now()
-      FROM due
-      WHERE f.id = due.id
-      RETURNING f.id, f.reservation_id
-    `);
-
-    let sent = 0;
-
-    for (const row of locked.rows) {
-      const rr = await pool.query(
-        `
-        SELECT f.id AS feedback_id,
-               u.id AS user_id,
-               u.phone AS user_phone,
-               u.name AS user_name
-        FROM reservation_feedbacks f
-        JOIN reservations r ON r.id = f.reservation_id
-        JOIN users u ON u.id = r.user_id
-        WHERE f.id = $1
-        LIMIT 1
-        `,
-        [row.id]
-      );
-
-      const item = rr.rows[0];
-      if (!item?.user_phone) continue;
-
-      await pool.query(
-        `
-        UPDATE users
-        SET active_feedback_id = $1,
-            stage = 'FEEDBACK_WINE',
-            updated_at = now()
-        WHERE id = $2
-        `,
-        [item.feedback_id, item.user_id]
-      );
-
-      await sendWhatsAppText(
-        item.user_phone,
-        `🍷 Oi${item.user_name ? `, ${item.user_name}` : ""}! Como foi a experiência?\n\nQual vinho você levou?\n(Responda 0 se preferir pular)`
-      );
-
-      sent++;
-    }
-
-    return res.json({ ok: true, locked: locked.rowCount, sent });
-  } catch (err) {
-    console.error("❌ job send-due-feedbacks:", err?.response?.data || err);
-    return res.status(500).json({ ok: false });
-  }
-});
-
-// =========================
 // Validações de entrada
 // =========================
 function parsePartySize(text) {
@@ -618,7 +383,11 @@ function parseMonth(text) {
 function isValidDay(year, month, day) {
   if (!Number.isInteger(day) || day < 1 || day > 31) return false;
   const d = new Date(Date.UTC(year, month - 1, day));
-  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day
+  );
 }
 
 function parseDay(text) {
@@ -636,7 +405,9 @@ function parseTimeHHMM(text) {
   const mm = parseInt(m[2], 10);
   if (hh < 0 || hh > 23) return null;
   if (mm < 0 || mm > 59) return null;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  const hh2 = String(hh).padStart(2, "0");
+  const mm2 = String(mm).padStart(2, "0");
+  return `${hh2}:${mm2}`;
 }
 
 function monthMenuText() {
@@ -701,18 +472,19 @@ app.post("/webhook", async (req, res) => {
       const pending = await getLatestPendingReservationForRestaurant(restaurantByPhone.id);
 
       if (!pending) {
-        await sendWhatsAppText(phone, "Não encontrei nenhuma reserva pendente para confirmar/recusar no momento.");
+        await sendWhatsAppText(
+          phone,
+          "Não encontrei nenhuma reserva pendente para confirmar/recusar no momento."
+        );
         return res.sendStatus(200);
       }
 
-      const rStatus = pending.restaurant_response_status;
+      const rStatus = pending.restaurant_response_status; // null | AWAITING_REASON | AWAITING_REASON_TEXT | ...
 
+      // 1) Aguardando 1/0
       if (!rStatus) {
         if (text === "1") {
           await markRestaurantConfirmed(pending.id);
-
-          // ✅ cria feedback agendado (+90min)
-          await ensureFeedbackForReservation(pending.id);
 
           const timeStr = String(pending.reserved_time).slice(0, 5);
           await sendWhatsAppText(
@@ -738,27 +510,32 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // 2) Motivo (1/2/3)
       if (rStatus === "AWAITING_REASON") {
         if (text === "1") {
           await markRestaurantRejected(pending.id, "Lotado");
+
           await sendWhatsAppText(
             pending.user_phone,
             `❌ O restaurante *${restaurantByPhone.name}* não conseguiu confirmar sua reserva.\n` +
               `Motivo: Lotado.\n\n` +
               `Quer tentar outro restaurante? 🍷`
           );
+
           await sendWhatsAppText(phone, "OK. Registrei como *Lotado* e avisei o cliente.");
           return res.sendStatus(200);
         }
 
         if (text === "2") {
           await markRestaurantRejected(pending.id, "Não funciona neste horário");
+
           await sendWhatsAppText(
             pending.user_phone,
             `❌ O restaurante *${restaurantByPhone.name}* não conseguiu confirmar sua reserva.\n` +
               `Motivo: Não funciona neste horário.\n\n` +
               `Quer tentar outro restaurante? 🍷`
           );
+
           await sendWhatsAppText(phone, "OK. Registrei o motivo e avisei o cliente.");
           return res.sendStatus(200);
         }
@@ -773,6 +550,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // 3) Texto livre
       if (rStatus === "AWAITING_REASON_TEXT") {
         const reason = (text || "").trim();
         if (reason.length < 3) {
@@ -838,84 +616,6 @@ app.post("/webhook", async (req, res) => {
     // Recarrega user (pode ter mudado)
     user = await getUserByPhone(phone);
 
-    // =========================
-    // FLUXO DE FEEDBACK (usuário)
-    // =========================
-    if (user.stage === "FEEDBACK_WINE") {
-      const fb = await getActiveFeedbackByUser(user);
-      if (!fb) {
-        await clearUserActiveFeedback(phone);
-        await setUserStage(phone, "ACTIVE");
-        await sendWhatsAppText(phone, "Ops, não encontrei seu feedback em andamento. 🙂");
-        return res.sendStatus(200);
-      }
-
-      const wine = (text || "").trim();
-      await setFeedbackWine(fb.id, wine === "0" ? null : wine);
-
-      await setUserStage(phone, "FEEDBACK_DISH");
-      await sendWhatsAppText(phone, "🍽️ E qual prato você pediu para harmonizar?\n(Responda 0 para pular)");
-      return res.sendStatus(200);
-    }
-
-    if (user.stage === "FEEDBACK_DISH") {
-      const fb = await getActiveFeedbackByUser(user);
-      if (!fb) {
-        await clearUserActiveFeedback(phone);
-        await setUserStage(phone, "ACTIVE");
-        await sendWhatsAppText(phone, "Ops, não encontrei seu feedback em andamento. 🙂");
-        return res.sendStatus(200);
-      }
-
-      const dish = (text || "").trim();
-      await setFeedbackDish(fb.id, dish === "0" ? null : dish);
-
-      await setUserStage(phone, "FEEDBACK_RATING");
-      await sendWhatsAppText(phone, "⭐ De 1 a 5, que nota você dá para o restaurante?");
-      return res.sendStatus(200);
-    }
-
-    if (user.stage === "FEEDBACK_RATING") {
-      const fb = await getActiveFeedbackByUser(user);
-      if (!fb) {
-        await clearUserActiveFeedback(phone);
-        await setUserStage(phone, "ACTIVE");
-        await sendWhatsAppText(phone, "Ops, não encontrei seu feedback em andamento. 🙂");
-        return res.sendStatus(200);
-      }
-
-      const rating = parseInt(text, 10);
-      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-        await sendWhatsAppText(phone, "Por favor, digite uma nota de 1 a 5.");
-        return res.sendStatus(200);
-      }
-
-      await setFeedbackRating(fb.id, rating);
-
-      await setUserStage(phone, "FEEDBACK_COMMENT");
-      await sendWhatsAppText(phone, "💬 Quer deixar um comentário rápido?\n(Responda 0 para finalizar sem comentário)");
-      return res.sendStatus(200);
-    }
-
-    if (user.stage === "FEEDBACK_COMMENT") {
-      const fb = await getActiveFeedbackByUser(user);
-      if (!fb) {
-        await clearUserActiveFeedback(phone);
-        await setUserStage(phone, "ACTIVE");
-        await sendWhatsAppText(phone, "Ops, não encontrei seu feedback em andamento. 🙂");
-        return res.sendStatus(200);
-      }
-
-      const comment = (text || "").trim();
-      await finishFeedback(fb.id, comment === "0" ? null : comment);
-
-      await clearUserActiveFeedback(phone);
-      await setUserStage(phone, "ACTIVE");
-
-      await sendWhatsAppText(phone, "✅ Obrigado! Seu feedback foi registrado. 🍷");
-      return res.sendStatus(200);
-    }
-
     // 3) Escolhendo restaurante
     if (user.stage === "CHOOSE_RESTAURANT") {
       const choice = parseInt(text, 10);
@@ -943,7 +643,10 @@ app.post("/webhook", async (req, res) => {
 
       await setUserStage(phone, "ASK_PARTY_SIZE");
 
-      await sendWhatsAppText(phone, `✅ Você escolheu:\n${selected.name}\n\nPara quantas pessoas será a reserva?`);
+      await sendWhatsAppText(
+        phone,
+        `✅ Você escolheu:\n${selected.name}\n\nPara quantas pessoas será a reserva?`
+      );
       return res.sendStatus(200);
     }
 
@@ -1034,7 +737,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 7) ASK_TIME
+    // 7) ASK_TIME (timezone-safe)
     if (user.stage === "ASK_TIME") {
       const resv = await getActiveReservationByUser(user);
       if (!resv) {
@@ -1058,8 +761,10 @@ app.post("/webhook", async (req, res) => {
 
       const restaurant = await getRestaurantById(resv.restaurant_id);
 
+      // Pega dados atualizados e formata data no Postgres (evita bug de fuso)
       const r2 = await pool.query(
-        `SELECT party_size, to_char(reserved_date, 'DD/MM/YYYY') AS date_br
+        `SELECT party_size,
+                to_char(reserved_date, 'DD/MM/YYYY') AS date_br
          FROM reservations
          WHERE id = $1`,
         [resv.id]
@@ -1068,7 +773,13 @@ app.post("/webhook", async (req, res) => {
       const partySize = r2.rows[0]?.party_size;
       const dateStr = r2.rows[0]?.date_br || "(data)";
 
-      const msg2 = formatConfirmMessage(restaurant?.name || "Restaurante", partySize, dateStr, timeHHMM);
+      const msg2 = formatConfirmMessage(
+        restaurant?.name || "Restaurante",
+        partySize,
+        dateStr,
+        timeHHMM
+      );
+
       await sendWhatsAppText(phone, msg2);
       return res.sendStatus(200);
     }
@@ -1104,6 +815,7 @@ app.post("/webhook", async (req, res) => {
 
       await confirmReservation(resv.id);
 
+      // Recarrega dados completos + data BR formatada no Postgres
       const rr = await pool.query(
         `SELECT r.*, 
                 u.name as user_name, 
@@ -1133,6 +845,7 @@ app.post("/webhook", async (req, res) => {
         await sendWhatsAppText(restaurant.phone_whatsapp, msgToRestaurant);
       }
 
+      // mantém active_reservation_id até o restaurante responder
       await setUserStage(phone, "WAIT_RESTAURANT");
 
       await sendWhatsAppText(
@@ -1207,7 +920,10 @@ app.get("/set-name", async (req, res) => {
       return res.status(400).send("Use ?phone=...&name=...");
     }
 
-    await pool.query("update users set name=$1, stage='ACTIVE', updated_at=now() where phone=$2", [name, phone]);
+    await pool.query(
+      "update users set name=$1, stage='ACTIVE', updated_at=now() where phone=$2",
+      [name, phone]
+    );
 
     res.send(`✅ OK! Usuário ${phone} atualizado para nome=${name}`);
   } catch (err) {
