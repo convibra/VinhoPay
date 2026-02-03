@@ -46,6 +46,41 @@ async function sendWhatsAppText(to, text) {
   }
 }
 
+async function sendWhatsAppImage(to, imageUrl, caption = "") {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${WA_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "image",
+        image: {
+          link: imageUrl,
+          ...(caption ? { caption } : {}),
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WA_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  } catch (err) {
+    const e = err?.response?.data?.error;
+    console.error("❌ Erro ao enviar imagem (detalhado):", {
+      message: e?.message,
+      type: e?.type,
+      code: e?.code,
+      error_subcode: e?.error_subcode,
+      fbtrace_id: e?.fbtrace_id,
+      status: err?.response?.status,
+    });
+    throw err;
+  }
+}
+
+
 // =========================
 // DB helpers: schema (MVP)
 // =========================
@@ -233,7 +268,11 @@ async function getRestaurantByPhone(phone) {
 
 async function getPartnerRestaurants() {
   const r = await pool.query(`
-    SELECT id, name, contact_name, phone_whatsapp, neighborhood, city, state, accepts_cork_waiver
+    SELECT
+      id, name, contact_name, phone_whatsapp,
+      neighborhood, city, state, accepts_cork_waiver,
+      cuisine_type, opening_hours, short_description,
+      image_url_1, image_url_2, image_url_3, image_url_4
     FROM restaurants
     WHERE is_partner = true
     ORDER BY name ASC
@@ -254,12 +293,20 @@ async function getRestaurantById(id) {
 
 
 function formatRestaurantMenu(restaurants) {
-  let msg = "🍷 Qual restaurante você quer reservar?\n\n";
+  let msg = "🍷 Escolha o restaurante para sua reserva:\n\n";
+
   restaurants.forEach((r, i) => {
-    const place = [r.neighborhood, r.city].filter(Boolean).join(" - ");
-    msg += `${i + 1}) ${r.name}${place ? ` (${place})` : ""}\n`;
+    const neighborhood = r.neighborhood ? ` (${r.neighborhood})` : "";
+    msg += `${i + 1}️⃣ *${r.name}*${neighborhood}\n`;
+
+    if (r.cuisine_type) msg += `🍴 Cozinha: ${r.cuisine_type}\n`;
+    if (r.opening_hours) msg += `⏰ ${r.opening_hours}\n`;
+    if (r.short_description) msg += `✨ ${r.short_description}\n`;
+
+    msg += `\n`;
   });
-  msg += "\nResponda apenas com o número.";
+
+  msg += "Responda apenas com o número.";
   return msg;
 }
 
@@ -946,6 +993,38 @@ app.post("/webhook", async (req, res) => {
       await setUserActiveReservation(phone, reservationId);
 
       await setUserStage(phone, "ASK_PARTY_SIZE");
+      
+      const selected = restaurants[choice - 1];
+
+	const reservationId = await createDraftReservation(user.id, selected.id);
+	await setUserActiveReservation(phone, reservationId);
+
+	await setUserStage(phone, "ASK_PARTY_SIZE");
+
+	// 📸 Envia 3-4 fotos do restaurante escolhido (se existirem)
+	const photos = [
+  	 selected.image_url_1,
+  	 selected.image_url_2,
+  	 selected.image_url_3,
+  	 selected.image_url_4,
+	]
+  	 .filter(Boolean)
+  	 .map((u) => u.trim())
+  	 .filter((u) => u.startsWith("http"));
+
+	if (photos.length) {
+  	 await sendWhatsAppText(
+       phone,
+       `📸 Alguns pratos do *${selected.name}* para você se inspirar:`
+  	);
+
+  for (let i = 0; i < Math.min(4, photos.length); i++) {
+    const caption = i === 0 ? selected.name : "";
+    await sendWhatsAppImage(phone, photos[i], caption);
+  }
+}
+
+
 
       await sendWhatsAppText(phone, `✅ Você escolheu:\n${selected.name}\n\nPara quantas pessoas será a reserva?`);
       return res.sendStatus(200);
