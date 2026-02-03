@@ -986,13 +986,6 @@ app.post("/webhook", async (req, res) => {
         await sendWhatsAppText(phone, "Número inválido. Escolha um da lista.");
         return res.sendStatus(200);
       }
-
-      const selected = restaurants[choice - 1];
-
-      const reservationId = await createDraftReservation(user.id, selected.id);
-      await setUserActiveReservation(phone, reservationId);
-
-      await setUserStage(phone, "ASK_PARTY_SIZE");
       
       const selected = restaurants[choice - 1];
 
