@@ -559,10 +559,12 @@ app.get("/jobs/send-due-feedbacks", async (req, res) => {
         SELECT f.id AS feedback_id,
                u.id AS user_id,
                u.phone AS user_phone,
-               u.name AS user_name
+               u.name AS user_name,
+               rt.name AS restaurant_name
         FROM reservation_feedbacks f
         JOIN reservations r ON r.id = f.reservation_id
         JOIN users u ON u.id = r.user_id
+        JOIN restaurants rt ON rt.id = r.restaurant_id
         WHERE f.id = $1
         LIMIT 1
         `,
@@ -585,7 +587,7 @@ app.get("/jobs/send-due-feedbacks", async (req, res) => {
 
       await sendWhatsAppText(
         item.user_phone,
-        `🍷 Oi${item.user_name ? `, ${item.user_name}` : ""}! Como foi a experiência?\n\nQual vinho você levou?\n(Responda 0 se preferir pular)`
+        `🍷 Oi${userName}! Gostaria de saber como foi sua experiência no *${restaurantName}* 😊\n\n` +`Qual vinho você levou? (Responda 0 para pular)`
       );
 
       sent++;
@@ -854,7 +856,7 @@ app.post("/webhook", async (req, res) => {
       await setFeedbackWine(fb.id, wine === "0" ? null : wine);
 
       await setUserStage(phone, "FEEDBACK_DISH");
-      await sendWhatsAppText(phone, "🍽️ E qual prato você pediu para harmonizar?\n(Responda 0 para pular)");
+      await sendWhatsAppText(phone, "🍽️ E qual prato você pediu para acompanhar o vinho? (Responda 0 para pular)");
       return res.sendStatus(200);
     }
 
@@ -871,7 +873,7 @@ app.post("/webhook", async (req, res) => {
       await setFeedbackDish(fb.id, dish === "0" ? null : dish);
 
       await setUserStage(phone, "FEEDBACK_RATING");
-      await sendWhatsAppText(phone, "⭐ De 1 a 5, que nota você dá para o restaurante?");
+      await sendWhatsAppText(phone, "⭐ De 1 a 5, que nota você dá para o restaurante? (1 = ruim, 5 = excelente)");
       return res.sendStatus(200);
     }
 
@@ -893,7 +895,7 @@ app.post("/webhook", async (req, res) => {
       await setFeedbackRating(fb.id, rating);
 
       await setUserStage(phone, "FEEDBACK_COMMENT");
-      await sendWhatsAppText(phone, "💬 Quer deixar um comentário rápido?\n(Responda 0 para finalizar sem comentário)");
+      await sendWhatsAppText(phone, 💬 Quer deixar um comentário rápido sobre a experiência? (Responda 0 para finalizar)");
       return res.sendStatus(200);
     }
 
