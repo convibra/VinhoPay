@@ -253,12 +253,29 @@ async function getRestaurantById(id) {
 
 function fixEncoding(str) {
   if (!str) return str;
-  try {
-    // Corrige casos típicos onde o texto chegou como latin1/win1252
-    return Buffer.from(str, "latin1").toString("utf8");
-  } catch {
-    return str;
-  }
+
+  return str
+    .replace(/Š/g, "è")
+    .replace(/`/g, "è")
+    .replace(/Ã©/g, "é")
+    .replace(/Ã£/g, "ã")
+    .replace(/Ã§/g, "ç");
+}
+
+function formatRestaurantMenu(restaurants) {
+  let msg = "🍷 Qual restaurante você quer reservar?\n\n";
+
+  restaurants.forEach((r, i) => {
+    const name = fixEncoding(r.name);
+    const neighborhood = fixEncoding(r.neighborhood);
+    const city = fixEncoding(r.city);
+
+    const place = [neighborhood, city].filter(Boolean).join(" - ");
+    msg += `${i + 1}) ${name}${place ? ` (${place})` : ""}\n`;
+  });
+
+  msg += "\nResponda apenas com o número.";
+  return msg;
 }
 
 function formatRestaurantMenu(restaurants) {
