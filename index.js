@@ -251,45 +251,14 @@ async function getRestaurantById(id) {
   return r.rows[0] ?? null;
 }
 
-function fixEncoding(str) {
-  if (!str) return str;
 
-  return str
-    .replace(/Š/g, "è")
-    .replace(/`/g, "è")
-    .replace(/Ã©/g, "é")
-    .replace(/Ã£/g, "ã")
-    .replace(/Ã§/g, "ç");
-}
 
 function formatRestaurantMenu(restaurants) {
   let msg = "🍷 Qual restaurante você quer reservar?\n\n";
-
   restaurants.forEach((r, i) => {
-    const name = fixEncoding(r.name);
-    const neighborhood = fixEncoding(r.neighborhood);
-    const city = fixEncoding(r.city);
-
-    const place = [neighborhood, city].filter(Boolean).join(" - ");
-    msg += `${i + 1}) ${name}${place ? ` (${place})` : ""}\n`;
+    const place = [r.neighborhood, r.city].filter(Boolean).join(" - ");
+    msg += `${i + 1}) ${r.name}${place ? ` (${place})` : ""}\n`;
   });
-
-  msg += "\nResponda apenas com o número.";
-  return msg;
-}
-
-function formatRestaurantMenu(restaurants) {
-  let msg = "🍷 Qual restaurante você quer reservar?\n\n";
-
-  restaurants.forEach((r, i) => {
-    const name = fixEncoding(r.name);
-    const neighborhood = fixEncoding(r.neighborhood);
-    const city = fixEncoding(r.city);
-
-    const place = [neighborhood, city].filter(Boolean).join(" - ");
-    msg += `${i + 1}) ${name}${place ? ` (${place})` : ""}\n`;
-  });
-
   msg += "\nResponda apenas com o número.";
   return msg;
 }
