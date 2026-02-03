@@ -895,7 +895,7 @@ app.post("/webhook", async (req, res) => {
       await setFeedbackRating(fb.id, rating);
 
       await setUserStage(phone, "FEEDBACK_COMMENT");
-      await sendWhatsAppText(phone, 💬 Quer deixar um comentário rápido sobre a experiência? (Responda 0 para finalizar)");
+      await sendWhatsAppText(phone, "💬 Quer deixar um comentário rápido sobre a experiência? (Responda 0 para finalizar)");
       return res.sendStatus(200);
     }
 
