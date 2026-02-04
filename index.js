@@ -994,10 +994,6 @@ app.post("/webhook", async (req, res) => {
 
 	await setUserStage(phone, "ASK_PARTY_SIZE");
 
-	
-}
-
-
 
       await sendWhatsAppText(phone, `✅ Você escolheu:\n${selected.name}\n\nPara quantas pessoas será a reserva?`);
       return res.sendStatus(200);
